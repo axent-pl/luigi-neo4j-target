@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "luigi-neo4j-target"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Luigi Target implementation for Neo4j."
 readme = "README.md"
 authors = [
