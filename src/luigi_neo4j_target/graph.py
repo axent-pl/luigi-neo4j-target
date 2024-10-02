@@ -1,19 +1,39 @@
 from dataclasses import dataclass, field
+import re
 from typing import List, Dict, Any
+from uuid import UUID, uuid4
 
 @dataclass
 class Node:
     """
     Represents a node (vertex) in the graph.
     """
-    label: str
+    name: str
+    labels: List[str]
+    uuid: UUID = field(default_factory=uuid4)
     properties: Dict[str, Any] = field(default_factory=dict)
+    _properties: Dict[str, Any] = field(init=False, repr=False)
     
+    def __post_init__(self):
+        valid_label = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        for label in self.labels:
+            if not valid_label.match(label):
+                raise ValueError(f"Invalid label: '{label}'. Labels must start with a letter and contain only alphanumeric characters and underscores.")
+
     def __str__(self) -> str:
-        return f'()'
+        labels_str = ":".join(self.labels)
+        return f'(:{labels_str} {self.properties})'
 
     def __hash__(self):
-        return hash((self.label, frozenset(self.properties.items())))
+        return hash(self.uuid)
+
+    @property
+    def properties(self) -> Dict[str, Any]:
+        return {"uuid": str(self.uuid), "name": self.name, **self._properties}
+    
+    @properties.setter
+    def properties(self, properties: Dict[str, Any]) -> None:
+        self._properties = properties if isinstance(properties, dict) else {}
 
 
 @dataclass
@@ -21,12 +41,18 @@ class Relationship:
     """
     Represents a relationship (edge) between two nodes in the graph.
     """
-    start_node: Node
-    end_node: Node
-    rel_type: str = "RELATED_TO"
+    source: Node
+    type: str
+    target: Node
+    properties: Dict[str, Any] = field(default_factory=dict)
+
+
+    def __str__(self) -> str:
+        _properties = str(self.properties) if self.properties else ''
+        return f'{self.source}-[:{self.type} {_properties}]->{self.target}'
 
     def __hash__(self):
-        return hash((self.start_node, self.end_node, self.rel_type))
+        return hash((self.source, self.type, self.target))
 
 
 @dataclass
@@ -48,26 +74,8 @@ class Graph:
         """
         Adds a relationship to the graph, ensuring the nodes exist.
         """
-        self.add_node(relationship.start_node)
-        self.add_node(relationship.end_node)
+        self.add_node(relationship.source)
+        self.add_node(relationship.target)
         
         if relationship not in self.relationships:
             self.relationships.append(relationship)
-
-    def to_dict(self) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Converts the graph into a dictionary format suitable for Neo4jTarget.
-        """
-        nodes_dict = [
-            {"label": node.label, "properties": node.properties}
-            for node in self.nodes
-        ]
-        relationships_dict = [
-            {
-                "start": relationship.start_node.properties.get("name", ""),
-                "end": relationship.end_node.properties.get("name", ""),
-                "type": relationship.rel_type
-            }
-        for relationship in self.relationships]
-        
-        return {"nodes": nodes_dict, "relationships": relationships_dict}
