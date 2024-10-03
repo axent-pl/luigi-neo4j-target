@@ -1,7 +1,23 @@
+from contextlib import contextmanager
 import luigi
 from neo4j import GraphDatabase
-from typing import Callable, Any, Optional
-from .graph import Graph, Node, Relationship
+from typing import Callable, Any, Optional, Union
+from graph import Graph, Node, Relationship
+
+class Neo4jWriter(object):
+
+    def __init__(self, session, target:'Neo4jTarget'):
+        self.session = session
+        self.target = target
+
+    def write(self, object:Union[Node, Relationship, Any]):
+        if isinstance(object,Node):
+            self.target._add_node(session=self.session, node=object)
+        elif isinstance(object,Relationship):
+            self.target._add_relationship(session=self.session, relationship=object)
+        else:
+            raise ValueError(f"Object of class {object.__class__} not supported.")
+        
 
 class Neo4jTarget(luigi.Target):
     def __init__(self, database: GraphDatabase.driver, graph_id: str, 
@@ -50,6 +66,31 @@ class Neo4jTarget(luigi.Target):
             result = session.run(query, graph_id=self.graph_id)
             return result.single() is not None
 
+    def _del_graph(self, session) -> None:
+        query = """
+        MATCH (n {graph_id: $graph_id})
+        DETACH DELETE n
+        """
+        session.run(query, graph_id=self.graph_id)
+
+    def _add_node(self, session, node:Node) -> None:
+        label = ":".join(node.labels)
+        properties = node.properties
+        properties["graph_id"] = self.graph_id  # Tag nodes with graph_id
+        query = f"CREATE (n:{label} $properties)"
+        session.run(query, properties=properties)
+
+    def _add_relationship(self, session, relationship:Relationship) -> Node:
+        source_uuid = str(relationship.source.uuid)
+        target_uuid = str(relationship.target.uuid)
+        type = relationship.type
+        query = f"""
+        MATCH (a {{uuid: $source_uuid, graph_id: $graph_id}}), 
+                (b {{uuid: $target_uuid, graph_id: $graph_id}})
+        CREATE (a)-[r:{type} $properties]->(b)
+        """
+        session.run(query, source_uuid=source_uuid, target_uuid=target_uuid, graph_id=self.graph_id, properties=relationship.properties)
+
     def put(self, graph_data: Any):
         """
         Store the graph (transformed from any data using marshaler) into the database.
@@ -58,28 +99,12 @@ class Neo4jTarget(luigi.Target):
         """
         graph = self.marshaler(graph_data)  # Transform the input into a Graph
         with self.database.session() as session:
-            query = """
-            MATCH (n {graph_id: $graph_id})
-            DETACH DELETE n
-            """
-            session.run(query, graph_id=self.graph_id)
+            self._del_graph(session=session)
             for node in graph.nodes:
-                label = ":".join(node.labels)
-                properties = node.properties
-                properties["graph_id"] = self.graph_id  # Tag nodes with graph_id
-                query = f"CREATE (n:{label} $properties)"
-                session.run(query, properties=properties)
+                self._add_node(session=session, node=node)
 
             for relationship in graph.relationships:
-                source_uuid = str(relationship.source.uuid)
-                target_uuid = str(relationship.target.uuid)
-                type = relationship.type
-                query = f"""
-                MATCH (a {{uuid: $source_uuid, graph_id: $graph_id}}), 
-                      (b {{uuid: $target_uuid, graph_id: $graph_id}})
-                CREATE (a)-[r:{type} $properties]->(b)
-                """
-                session.run(query, source_uuid=source_uuid, target_uuid=target_uuid, graph_id=self.graph_id, properties=relationship.properties)
+                self._add_relationship(session=session, relationship=relationship)
 
     def get(self) -> Any:
         """
@@ -116,3 +141,16 @@ class Neo4jTarget(luigi.Target):
 
             graph = Graph(nodes=nodes.values(), relationships=relationships)
             return self.unmarshaler(graph)  # Transform the Graph into the desired output format
+        
+    @contextmanager
+    def open(self, mode='w'):
+        if mode not in ['w', 'wa']:
+            raise ValueError(f"Mode {mode} not supported.")
+        
+        with self.database.session() as session:
+            try:
+                if mode == 'w':
+                    self._del_graph(session=session)
+                yield Neo4jWriter(session=session, target=self)
+            finally:
+                pass
